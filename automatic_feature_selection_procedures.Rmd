@@ -1,0 +1,270 @@
+---
+title: "A Review of Automatic Feature Selection Processes in R"
+author: "Michael Najarro"
+date: "12/5/2020"
+output: github_document
+---
+
+#*Objective*
+This report demonstrates automatic feature selection procedure (AFSP) tools in R. AFSPs expedite the data processing procedures commonly performed prior to implementing Machine Learning or Artifical Intelligence algorithms.
+
+Due to limitations of my hardware and for the purposes of testing AFSPs, I  work with several data sets to demonstrate the following AFSP packages in R:
+  1. Boruta
+  
+  2. LASSO
+  
+  3. Vtreat
+  
+  4. Vsurf
+  
+  5. Genetic algorithms in R
+
+
+# *Boruta*
+
+Written by Miron B. Kursa and Witold R. Rudnicki (https://www.jstatsoft.org/article/view/v036i11).
+
+Boruta aids in selecting the most minimally optimal variables from a large pool of features that maximize classification by implementing wrapper algorthims that avoids the influential effects of selection by accuracy.
+
+Boruta eseentially implements a two sample Z-test, comparing Z scores of the average loss of accuracy generated from a random forest applied to the ranked features of the data set to the Z scores of "shadow features" created from each variable. The shadow features are randomly selected values from a given variable. The comparison essentially evlautes the standing of a given variable relative to its imposter of random noise; if 
+its los of accuracy is not smaller than random noise, it is excluded.
+
+I demosntrate an example of Boruta below on the manually selected data of the Kaggle Lending Club analysis report (LC_Analysis.Rmd).
+
+If one has access to more extensive hardware, one could modify and apply these algorithms to the original Kaggle Lending CLub data set, with some minor processing (cleaning steps would be to convert the response variable to a factor format, remove NAS, and depending on the procedure,remove factor variables).
+
+Please note that in phase five of the Boruta AFSP, I implement the same machine learning processes found in the Kaggle data analysis project, to compare the reduced feature analysis to my original analysis. One may skip the immplementation of Boruta (the process took approximately 5 hours using 2nd generation Intel i5 M520 2 core processor with 8 GB of RAM) and load data based on Boruta's recommendation by going directly to phase 5 and implementing its code.
+
+
+```{r}
+library(pacman)
+p_load(Boruta,
+       tictoc)
+```
+
+## **Phase 1: Prepare your training and test data sets**
+
+#### 1.a) load your data and create test and training sets
+
+```{r}
+#LCTF <- readRDS(file="./cleaneddata.rds")
+refineddf <- readRDS(file = "./data/data_for_rf.rds" )
+
+# create the test data
+n <- nrow(refineddf)
+
+# create the test data
+test <- sample.int(n, size = round(0.25 * n))
+test_set <- refineddf[test, ]
+nrow(test_set)
+
+#create the training data
+train_set <- refineddf[-test,]
+nrow(train_set)
+```
+
+
+## **Phase 2: Implement Boruta**
+
+### 2.a) Implement Boruta on the training set
+
+Implementing Boruta on a small laptop with 8 GB of ram and only two core processor took approximately 5.33 hours. Please consider your hardware and timing before running this step. 
+
+```{r}
+tic()
+boruta.train <- Boruta(chance_default~., data = train_set, doTrace =  2)
+toc()
+```
+
+
+### 2.b) assess Boruta's results
+
+```{r}
+# what were boruta's results?
+boruta.train
+
+# the decisions made per variable
+boruta.train$finalDecision
+```
+
+
+a plot of the variable importance, based on the importance history output.
+
+```{r}
+plot(boruta.train, xlab = "", xaxt = "n")
+lz<-lapply(1:ncol(boruta.train$ImpHistory), function(i)
+boruta.train$ImpHistory[is.finite(boruta.train$ImpHistory[,i]),i] )
+names(lz) <- colnames(boruta.train$ImpHistory)
+labels <- sort(sapply(lz,median))
+axis(side = 1,
+     las=2,
+     labels = names(labels),
+     at = 1:ncol(boruta.train$ImpHistory),
+     cex.axis = 0.5)
+```
+
+```{r}
+# pull out the importance history as a separate data frame
+#a <- as.data.frame(boruta.train$ImpHistory)
+
+# within each column, there may be infinity and negative infinity values. So you have to go through each column and pull out the numeric values.
+#lz<-lapply(1:ncol(a), function(x) a[is.finite(boruta.train$ImpHistory[,x]),x] )
+
+# convert the list to a data frame and label columns
+#lz<- data.frame(matrix(unlist(lz), nrow = 99, byrow = FALSE))
+#names(lz) <- colnames(a[,c(1:43)])
+
+# now plot the summary of each element of lz
+#ggplot2(data = lz, mapping = aes(x = ))
+
+```
+
+
+## **Phase 3: Use Boruta's recommendation to reduce the number of predictor variables forrandom forest model training**
+
+```{r}
+p_load(tidyverse, magrittr)
+
+str(boruta.train$finalDecision)
+levels(boruta.train$finalDecision)
+
+# create a new vector of the final decisions
+b <- c(boruta.train$finalDecision)
+
+# identify the names of the elements that were confirmed.
+j<-names(which(b==2))
+
+#keep these columns in the original data set by tossing out others.
+refineddf <- refineddf %>%
+  select(all_of(j), chance_default)
+
+saveRDS(object = refineddf, file = "./boruta_train_data.RDS")
+```
+
+
+### phase 4: evalution
+
+Boruta reduced the number of variables from 45 to 37.
+
+```{r}
+bdata<- readRDS(file = "./data/boruta_train_data.RDS")
+```
+
+
+### phase 5: Run bortua features through random forest and compare to Kaggle data analysis project.
+I here now Implement a Random Forest algorithm for classification on the Boruta reduced-feeatured data.
+
+
+
+
+
+
+
+
+# LASSO
+
+The Least absolute shrinkage and selection operator, written by Robert Tibshirani (https://beehive.cs.princeton.edu/course/read/tibshirani-jrssb-1996.pdf)
+
+LASSO's goal is 
+
+## **Phase 1: Load your data into the environment**
+
+```{r}
+refineddf <- readRDS(file = "./data/data_for_rf.rds" )
+```
+
+
+## **Phase 2: Process data to contain strictly numeric data**
+
+Note that LASSO found in the glmnet package requires the use of all numeric values.
+
+```{r}
+a<- refineddf %>%
+  select_if(is.numeric)
+
+# 1 = safe, 0 = risk
+a$chance_default <- as.numeric(as.factor(refineddf$chance_default)) - 1
+x <- model.matrix(chance_default~., data = a)[,-33]
+y <- a$chance_default
+```
+
+
+## **Phase 3: Implement LASSO**
+
+```{r}
+library(glmnet)
+
+lasso_mod <- glmnet(x, y, alpha = 0)
+
+set.seed(1443)
+lasso_cvfit <- cv.glmnet(x, y, alpha=0)
+lasso_cvfit$lambda.min # selected labda value
+
+#plot with alpha threshold
+plot(lasso_mod, xvar = "lambda")
+abline(v=log(lasso_cvfit$lambda.min))
+
+ 
+coef(lasso_cvfit, s="lambda.min")
+lasso_coefs <- as.numeric(coef(lasso_cvfit, s="lambda.min"))
+#sum(abs(lasso_coefs) > 0)
+```
+
+
+
+# Vtreat
+
+Written by John Mount and Nina Zumel (https://github.com/WinVector/vtreat, https://arxiv.org/pdf/1611.09477.pdf).
+
+A package conaining methods for preprocessing data for supervised machine learning or predictive modeling.
+
+Vtreat takes a data frame with defined refined response and predictor variables and cleans the data by transforming all non-numeric columns to type numeric. Vtreat can deal with categorical variables that contain a large number of levels or exposure to new levels in the test data through sub modeling procedures.
+
+Vtreat has a variety of built in methods to deal with processing issues, and several procedures depending on the type of machine learning algorithm and purpose one wishes to perform. For this example, I will implement Vtreat for the purpose of supervised classification and I base my first example around Mount's and Zumel's "fit_prepare" classification example. This updated procedure to Vtreat, is based on Python's Scikit learn pipeline (https://github.com/WinVector/vtreat/blob/master/Examples/fit_transform/fit_prepare_api.md)
+
+
+## **Phase 1: load initial data**
+
+### 1.a) load your libraries and data
+As a proof of demonstration, I'm using a subsetted set of the Kaggle LoanClub data. The data contains six columns, with two containing factors, and three of the four continuous variables have NAs.
+
+```{r}
+# libraries
+p_load(vtreat, rqdatatable)
+
+#data
+VTdat <- readRDS(file ="./data/vtreat_data.rds")
+```
+
+
+## **Phase 2: Build your transform**
+
+```{r}
+transform_spec <- vtreat::BinomialOutcomeTreatment(
+    var_list = setdiff(colnames(d), c('y', 'yc')),  # columns to transform
+    outcome_name = 'yc',                            # outcome variable
+    outcome_target = TRUE                           # outcome of interest
+)
+```
+
+### apply your fit Prepare to fit to the transform.
+
+```{r}
+unpack[
+  treatment_plan = treatments,
+  d_prepared = cross_frame
+  ] <- fit_prepare(transform_spec, d)     
+
+# list the derived variables
+get_feature_names(treatment_plan)
+```
+
+
+
+```{r}
+
+```
+
+
+
+I will also include examples of the past procedures for Vtreat using Mount and Zumel's other example (classfication example (https://github.com/WinVector/vtreat/blob/master/Examples/Classification/Classification.md).
