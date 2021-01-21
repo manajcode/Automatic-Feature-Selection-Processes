@@ -17,7 +17,7 @@ Due to limitations of my hardware and for the purposes of testing AFSPs, I  work
   
   4. Vsurf
   
-  5. Genetic algorithms in R
+  5. Genetic algorithm (GA)
 
 
 # *Boruta*
@@ -220,24 +220,347 @@ A package conaining methods for preprocessing data for supervised machine learni
 
 Vtreat takes a data frame with defined refined response and predictor variables and cleans the data by transforming all non-numeric columns to type numeric. Vtreat can deal with categorical variables that contain a large number of levels or exposure to new levels in the test data through sub modeling procedures.
 
-Vtreat has a variety of built in methods to deal with processing issues, and several procedures depending on the type of machine learning algorithm and purpose one wishes to perform. For this example, I will implement Vtreat for the purpose of supervised classification and I base my first example around Mount's and Zumel's "fit_prepare" classification example. This updated procedure to Vtreat, is based on Python's Scikit learn pipeline (https://github.com/WinVector/vtreat/blob/master/Examples/fit_transform/fit_prepare_api.md)
+Vtreat has a variety of built in methods to deal with processing issues, and several procedures depending on the type of machine learning algorithm and purpose one wishes to perform.
 
+For this example, I will implement Vtreat for the purpose of supervised classification and I base my first example around the nested bias model found in Mount and Zumel's 2019 Arxive article. 
+
+I then apply the "fit_prepare" classification example. This updated procedure to Vtreat, is based on Python's Scikit learn pipeline (https://github.com/WinVector/vtreat/blob/master/Examples/fit_transform/fit_prepare_api.md)
 
 ## **Phase 1: load initial data**
 
 ### 1.a) load your libraries and data
-As a proof of demonstration, I'm using a subsetted set of the Kaggle LoanClub data. The data contains six columns, with two containing factors, and three of the four continuous variables have NAs.
+As a proof of demonstration, I will use the LCTF10 data used in my Kaggle Lending Club Analysis project.
 
 ```{r}
 # libraries
-p_load(vtreat, rqdatatable)
+p_load(vtreat, car, magrittr, tidyverse, rqdatatable)
 
-#data
-VTdat <- readRDS(file ="./data/vtreat_data.rds")
+LCTF10 <- readRDS(file = "./data/cleaneddata.rds" )
+```
+
+###1.b) Pre cleaning of data before Vtreat
+
+Due to limitations in hardware and to prepare the data for vtreat, I first need to modify the response variable.
+
+```{r}
+# convert the response to a factor
+LCTF10$borrower_status <- as.factor(LCTF10$borrower_status)
+
+# create a new vector that avoids the space in the response variable's levels
+possible_default <- as.factor(recode(as.vector(LCTF10$borrower_status), "'risky client'='risk'; 'safe client'='safe'"))
+
+# add the vector to LCTF10
+LCTF10 <- LCTF10 %>%
+  mutate(chance_default = possible_default) %>%
+  select(-borrower_status)
+```
+
+
+I then remove a few initial columns that are filled with or over 50% NAs.
+
+```{r}
+# create a function to determine which variables have
+# less than or equal to 50% legit data:
+d <- rep(0, ncol(LCTF10))
+bad <- as.integer(rep(0, ncol(LCTF10)))
+result<- as.character(rep(0, nrow(LCTF10)))
+
+assess_bad_data<- function(df) {
+d <<- (colSums(!is.na(LCTF10))/nrow(LCTF10))
+bad <<- (which(d <=.50))
+result <<- (colnames(LCTF10[bad]))
+#return(result)
+}
+assess_bad_data(LCTF10)
+
+#how many bad columns are there?
+length(result)
+
+#which are the bad columns(by column number)?
+bad
+
+# toss the bad variables from td.
+LCTF10 <- LCTF10[-(bad)]
+
+rm(bad,d,possible_default,result,assess_bad_data)
 ```
 
 
 ## **Phase 2: Build your transform**
+
+Within the data are several columns containing NAs, and categorical variables with extreme cardinality (categorical levels with many levels.)
+
+```{r}
+library(Amelia)
+missmap(LCTF10)
+```
+
+### 3.a) generate three sub groups
+
+Vtreat documenation recommends splitting the data into three subsets to prevent overfitting: calibraition, training, and test sets. I perform these splits below.
+
+```{r}
+LCTF10$group <- sample(c("cal", "train", "test"),
+                       nrow(LCTF10),
+                       replace=TRUE,
+                       prob=c(0.6, 0.2, 0.2))
+
+Lcal <- LCTF10[LCTF10$group =='cal', , drop=FALSE]
+
+Ltrain <- LCTF10[LCTF10$group =='train', , drop=FALSE]
+
+Ltest <- LCTF10[LCTF10$group =='test', , drop=FALSE]
+```
+
+
+### 3.b) create the treatment plan on calibrated data
+
+The next step is to create a designed treatment plan from the calibration data set. 
+
+```{r}
+colname <- names(Lcal[1:108])
+Lcal<- Lcal[,-110]
+
+("id",                        
+"loan_amnt",                 
+"funded_amnt",               
+"funded_amnt_inv",           
+"term",                  
+"int_rate",                  
+"installment",               
+"grade",                     
+"sub_grade",                
+"emp_title",                 
+"emp_length",                
+"home_ownership",            
+"annual_inc",                
+"verification_status",       
+"Issue_Month",               
+"Issue_Year",                
+"loan_status",               
+"pymnt_plan",                
+"url",                
+"desc",                      
+"purpose",                   
+"title",                     
+ "zip_code",                  
+ "addr_state",                
+ "dti",                       
+ "delinq_2yrs",               
+ "earliest_cr_line",          
+ "fico_range_low",            
+ "fico_range_high",           
+ "inq_last_6mths",            
+ "open_acc",                  
+"pub_rec",                   
+ "revol_bal",                 
+ "revol_util",                
+ "total_acc",                 
+"initial_list_status",       
+ "out_prncp",                 
+ "out_prncp_inv",             
+"total_pymnt",               
+"total_pymnt_inv",           
+"total_rec_prncp",           
+"total_rec_int",            
+"total_rec_late_fee",        
+"recoveries",                
+"collection_recovery_fee",   
+"last_pymnt_d",              
+"last_pymnt_amnt",           
+"next_pymnt_d",              
+"last_credit_pull_d",      
+"last_fico_range_high",      
+"last_fico_range_low",       
+"collections_12_mths_ex_med",
+ "policy_code",               
+ "application_type",          
+ "verification_status_joint", 
+ "acc_now_delinq",            
+ "tot_coll_amt",              
+ "tot_cur_bal",               
+ "total_rev_hi_lim",          
+ "acc_open_past_24mths",      
+ "avg_cur_bal",               
+ "bc_open_to_buy",            
+ "bc_util",                   
+ "chargeoff_within_12_mths",  
+ "delinq_amnt",               
+"mo_sin_old_il_acct",        
+ "mo_sin_old_rev_tl_op",      
+ "mo_sin_rcnt_rev_tl_op",     
+ "mo_sin_rcnt_tl",            
+ "mort_acc",                  
+ "mths_since_recent_bc",      
+ "mths_since_recent_inq",     
+ "num_accts_ever_120_pd",     
+ "num_actv_bc_tl",            
+ "num_actv_rev_tl",           
+ "num_bc_sats",               
+ "num_bc_tl",                 
+ "num_il_tl",                 
+ "num_op_rev_tl",             
+ "num_rev_accts",             
+ "num_rev_tl_bal_gt_0",       
+ "num_sats",                  
+ "num_tl_120dpd_2m",          
+ "num_tl_30dpd",              
+ "num_tl_90g_dpd_24m",        
+ "num_tl_op_past_12m",        
+ "pct_tl_nvr_dlq",            
+ "percent_bc_gt_75",          
+ "pub_rec_bankruptcies",      
+ "tax_liens",                 
+ "tot_hi_cred_lim",           
+ "total_bal_ex_mort",         
+ "total_bc_limit",            
+ "total_il_high_credit_limit",
+ "sec_app_earliest_cr_line",  
+ "hardship_flag",             
+ "hardship_type",             
+ "hardship_reason",          
+ "hardship_status",           
+ "hardship_start_date",       
+ "hardship_end_date",         
+ "payment_plan_start_date",   
+ "hardship_loan_status",      
+ "disbursement_method",       
+ "debt_settlement_flag",      
+ "debt_settlement_flag_date", 
+ "settlement_status",         
+ "settlement_date")           
+
+treatments <- vtreat::designTreatmentsC(Lcal,
+                                c("id",               
+"loan_amnt",                 
+"funded_amnt",               
+"funded_amnt_inv",           
+"term",                  
+"int_rate",                  
+"installment",               
+"grade",                     
+"sub_grade",                
+"emp_title",                 
+"emp_length",                
+"home_ownership",            
+"annual_inc",                
+"verification_status",       
+"Issue_Month",               
+"Issue_Year",                
+"loan_status",               
+"pymnt_plan",                
+"url",                
+"desc",                      
+"purpose",                   
+"title",                     
+ "zip_code",                  
+ "addr_state",                
+ "dti",                       
+ "delinq_2yrs",               
+ "earliest_cr_line",          
+ "fico_range_low",            
+ "fico_range_high",           
+ "inq_last_6mths",            
+ "open_acc",                  
+"pub_rec",                   
+ "revol_bal",                 
+ "revol_util",                
+ "total_acc",                 
+"initial_list_status",       
+ "out_prncp",                 
+ "out_prncp_inv",             
+"total_pymnt",               
+"total_pymnt_inv",           
+"total_rec_prncp",           
+"total_rec_int",            
+"total_rec_late_fee",        
+"recoveries",                
+"collection_recovery_fee",   
+"last_pymnt_d",              
+"last_pymnt_amnt",           
+"next_pymnt_d",              
+"last_credit_pull_d",      
+"last_fico_range_high",      
+"last_fico_range_low",       
+"collections_12_mths_ex_med",
+ "policy_code",               
+ "application_type",          
+ "verification_status_joint", 
+ "acc_now_delinq",            
+ "tot_coll_amt",              
+ "tot_cur_bal",               
+ "total_rev_hi_lim",          
+ "acc_open_past_24mths",      
+ "avg_cur_bal",               
+ "bc_open_to_buy",            
+ "bc_util",                   
+ "chargeoff_within_12_mths",  
+ "delinq_amnt",               
+"mo_sin_old_il_acct",        
+ "mo_sin_old_rev_tl_op",      
+ "mo_sin_rcnt_rev_tl_op",     
+ "mo_sin_rcnt_tl",            
+ "mort_acc",                  
+ "mths_since_recent_bc",      
+ "mths_since_recent_inq",     
+ "num_accts_ever_120_pd",     
+ "num_actv_bc_tl",            
+ "num_actv_rev_tl",           
+ "num_bc_sats",               
+ "num_bc_tl",                 
+ "num_il_tl",                 
+ "num_op_rev_tl",             
+ "num_rev_accts",             
+ "num_rev_tl_bal_gt_0",       
+ "num_sats",                  
+ "num_tl_120dpd_2m",          
+ "num_tl_30dpd",              
+ "num_tl_90g_dpd_24m",        
+ "num_tl_op_past_12m",        
+ "pct_tl_nvr_dlq",            
+ "percent_bc_gt_75",          
+ "pub_rec_bankruptcies",      
+ "tax_liens",                 
+ "tot_hi_cred_lim",           
+ "total_bal_ex_mort",         
+ "total_bc_limit",            
+ "total_il_high_credit_limit",
+ "sec_app_earliest_cr_line",  
+ "hardship_flag",             
+ "hardship_type",             
+ "hardship_reason",          
+ "hardship_status",           
+ "hardship_start_date",       
+ "hardship_end_date",         
+ "payment_plan_start_date",   
+ "hardship_loan_status",      
+ "disbursement_method",       
+ "debt_settlement_flag",      
+ "debt_settlement_flag_date", 
+ "settlement_status",         
+ "settlement_date",
+'chance_default'
+),
+'chance_default',
+outcometarget=TRUE,
+verbose=FALSE)
+```
+
+
+### 3.c) apply the treatment plan to the treatment data set.
+
+```{r}
+TrainTreated <- vtreat::prepare(treatments,
+                                 Ltrain,
+                                 pruneSig=NULL)
+```
+
+
+
+
+
+
+
 
 ```{r}
 transform_spec <- vtreat::BinomialOutcomeTreatment(
@@ -259,11 +582,6 @@ unpack[
 get_feature_names(treatment_plan)
 ```
 
-
-
-```{r}
-
-```
 
 
 
