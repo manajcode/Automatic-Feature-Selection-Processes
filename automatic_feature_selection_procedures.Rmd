@@ -222,23 +222,30 @@ Vtreat takes a data frame with defined refined response and predictor variables 
 
 Vtreat has a variety of built in methods to deal with processing issues, and several procedures depending on the type of machine learning algorithm and purpose one wishes to perform.
 
-For this example, I will implement Vtreat for the purpose of supervised classification and I base my first example around the nested bias model found in Mount and Zumel's 2019 Arxive article. 
+There are two general approaches to using Vtreat:
 
-I then apply the "fit_prepare" classification example. This updated procedure to Vtreat, is based on Python's Scikit learn pipeline (https://github.com/WinVector/vtreat/blob/master/Examples/fit_transform/fit_prepare_api.md)
+  1. Using the three prong approach commonly found in Machine learning, where data is split into to training, validation, and testing (in Vtreat examples it is calibration, training, testing).
+  
+  2. the more statistically efficient manner is to merge the training and validation steps through cross validation approaches, essentially limiting the split in data to two phases.
 
-## **Phase 1: load initial data**
+I first focus on the first, and recommended approach, followed by the second, and more complicated approach.
 
-### 1.a) load your libraries and data
+## Cross Validation approach
+
+### **Phase 1: load initial data**
+
+#### 1.a) load your libraries and data
 As a proof of demonstration, I will use the LCTF10 data used in my Kaggle Lending Club Analysis project.
 
 ```{r}
 # libraries
+library(pacman)
 p_load(vtreat, car, magrittr, tidyverse, rqdatatable)
 
 LCTF10 <- readRDS(file = "./data/cleaneddata.rds" )
 ```
 
-###1.b) Pre cleaning of data before Vtreat
+#### 1.b) Pre cleaning of data before Vtreat
 
 Due to limitations in hardware and to prepare the data for vtreat, I first need to modify the response variable.
 
@@ -247,12 +254,15 @@ Due to limitations in hardware and to prepare the data for vtreat, I first need 
 LCTF10$borrower_status <- as.factor(LCTF10$borrower_status)
 
 # create a new vector that avoids the space in the response variable's levels
-possible_default <- as.factor(recode(as.vector(LCTF10$borrower_status), "'risky client'='risk'; 'safe client'='safe'"))
+possible_default <- as.factor(recode(as.vector(LCTF10$borrower_status), "risky client"='risk', "safe client"='safe'))
 
 # add the vector to LCTF10
 LCTF10 <- LCTF10 %>%
   mutate(chance_default = possible_default) %>%
   select(-borrower_status)
+
+#convert the vector to a binary outcome, with risk = 1, safe = 0.
+LCTF10$chance_default <- as.numeric(ifelse(LCTF10$chance_default == "risk", 1, 0))
 ```
 
 
@@ -269,7 +279,6 @@ assess_bad_data<- function(df) {
 d <<- (colSums(!is.na(LCTF10))/nrow(LCTF10))
 bad <<- (which(d <=.50))
 result <<- (colnames(LCTF10[bad]))
-#return(result)
 }
 assess_bad_data(LCTF10)
 
@@ -277,7 +286,7 @@ assess_bad_data(LCTF10)
 length(result)
 
 #which are the bad columns(by column number)?
-bad
+head(bad)
 
 # toss the bad variables from td.
 LCTF10 <- LCTF10[-(bad)]
@@ -286,7 +295,7 @@ rm(bad,d,possible_default,result,assess_bad_data)
 ```
 
 
-## **Phase 2: Build your transform**
+### **Phase 2: Build your transform**
 
 Within the data are several columns containing NAs, and categorical variables with extreme cardinality (categorical levels with many levels.)
 
@@ -295,294 +304,284 @@ library(Amelia)
 missmap(LCTF10)
 ```
 
-### 3.a) generate three sub groups
+#### 2.a) generate sub groups
+
+Vtreat documenation recommends splitting the data into two subsets to prevent overfitting: training and test sets. I perform these splits below.
+
+```{r}
+set.seed(16819)
+# perform a 10-fold cross validation on the original data.
+# note: each fold is split into 10 sets.
+
+dat <- kWayStratifiedY(nrow(LCTF10), 10, LCTF10, LCTF10$chance_default)
+
+# use the first fold to obtian the rows marked as test and training data.
+fold1 <- dat[[1]]
+train <- fold1$train # training set indices
+test <- fold1$app 
+
+#now pull the rows out
+t_train <- LCTF10[train, ,drop=FALSE] 
+t_test <- LCTF10[test, ,drop=FALSE]
+
+outcome <- 1
+vars <- setdiff(colnames(t_train), outcome)
+```
+
+
+#### 2.b) now create the treatment plan from training data
+
+```{r}
+# initiate parrallelization (parallel clusters)
+q <-parallel::detectCores()
+pc <- parallel::makeCluster(q)
+
+# generate the treatment plan  from training data
+ytarget <- 1
+crossframe_exp <- mkCrossFrameCExperiment(t_train,
+                                           varlist = vars,
+                                           outcomename = 'chance_default',
+                                           outcometarget = ytarget,
+                                           parallelCluster = pc)
+```
+
+
+##### 2.c) gather the treatment plan and the treated training data
+
+```{r}
+# pull out the treated plan
+treatment_plan <- crossframe_exp$treatments
+
+# pull out the training data that receieved the treatment plan
+train_treated <- crossframe_exp$crossFrame
+
+# memory bogging down; tidy up
+rm(LCTF10,dat,fold1,pc,q,outcome,test,train,ytarget)
+```
+
+
+#### 2.d) investigate the recommended features & the treated data
+
+check out the treatment plan by looking at the score frame.
+
+Each row of the score frame represents a transformed feature of the original data,indicated by the name in the `varName` column. 
+
+Note that the score frame contains all the variables listed in the original data set, plus additional variables containing an original column concatenated with prefixes of `isBAD`, `catB`, and `catP`.
+
+Transformed features without any prefix are the original features but without any missing values (NA).
+
+`isBAD` features are new, meta data features that contain binary representations of the presence or absence of data of their ancestral feature per record.
+
+`catB` feature is a new meta feature that contains the logit score of each response level of a factor variable and is considered the "impact" of the given level of a particular record.
+
+`catP` is a new meta feature that displays the percent of representation, that is the "prevalence" of a given level in a factor variable.
+
+The `rsq` and `sig` column represents the r-squared measure; the percent of variance explained by the model that the treatment plan devised and the significan of that measure.
+
+Also notice that the high cardinality variables are divided up such that each level obtains its own binary feature. This format is analogous to dummy variables in traditional regression modeling.
+
+```{r}
+sf <- treatment_plan$scoreFrame
+head(sf)
+
+#how many of the features are there?
+nrow(sf)
+table(sf$code)
+
+# how many columns should be used and others tossed?
+#about 149 out of 282 should be kept.
+table(sf$recommended)
+
+#pull all your selected variables from the scor frame
+sellvars <- sf$varName
+
+#Now pull out all of the recommended variables
+#model_vars <- sf$varName[sf$recommended]
+```
+
+
+The changes seen in the score fame are applied to the treated trained data. Investigate the cleanliness of the data; notice there are no NAs and no factor variables anymore.
+
+```{r}
+# count the number of missing values in each column
+nNAs <- sapply(train_treated,
+              function(x) sum(is.na(x)))
+summary(nNAs)
+
+# count the number of levels in each categorical column 
+v <- train_treated %>%
+  select_if(is.factor) %>%
+  sapply(function(x) length(levels(x)))
+
+summary(v)
+```
+
+
+#### 2.e) Now reduce your data frame in accordance with the recommendations of the treatment plan
+
+```{r}
+# pull out the recommended rows
+model_vars <- sf$varName[sf$recommended]
+
+# now filter the treated trained data based on recommended columnms.
+cleaned_train <- train_treated[model_vars]
+cleaned_train$chance_default <- train_treated$chance_default
+cleaned_train$chance_default <- as.factor(ifelse(LCTF10$chance_default ==  1, 'risk', 'safe')
+```
+
+
+
+#### 2.f) Build the random forest model on the treated training data, then run it.
+```{r}
+#build your random forest on the cleaned data.
+p_load(car, randomForest, caret, e1071)
+
+# create random forest model.,
+set.seed(33792)
+rf_train = randomForest(chance_default~., data=cleaned_train)
+
+
+# 
+
+```
+
+
+
+
+#### 2.g) Apply your treatment plan to the test data
+```{r}
+train_treated <-vtreat::prepare(treatment_plan,
+                  train,
+                   parallelCluster = pc,
+                   pruneSig=NULL)
+```
+
+
+
+#### 2.h) apply your training model to the test data.
+
+```{r}
+
+```
+
+
+
+
+
+
+#### 2.a) generate sub groups
 
 Vtreat documenation recommends splitting the data into three subsets to prevent overfitting: calibraition, training, and test sets. I perform these splits below.
 
 ```{r}
-LCTF10$group <- sample(c("cal", "train", "test"),
-                       nrow(LCTF10),
-                       replace=TRUE,
-                       prob=c(0.6, 0.2, 0.2))
+set.seed(16819)
+LCTF10$group <- base::sample(c("cal",
+                               "train",
+                               "test"),
+                             nrow(LCTF10),
+                             replace=TRUE,
+                             prob=c(0.5,
+                                    0.3,
+                                    0.2))
 
-Lcal <- LCTF10[LCTF10$group =='cal', , drop=FALSE]
+cal <- LCTF10[LCTF10$group =='cal', , drop=FALSE]
 
-Ltrain <- LCTF10[LCTF10$group =='train', , drop=FALSE]
+train <- LCTF10[LCTF10$group =='train', , drop=FALSE]
 
-Ltest <- LCTF10[LCTF10$group =='test', , drop=FALSE]
+test <- LCTF10[LCTF10$group =='test', , drop=FALSE]
+
+trainall <- LCTF10[LCTF10$group %in% c('cal', 'train'), , drop=FALSE]
+
+outcome <- 'risk'
+vars <- setdiff(colnames(trainall), outcome)
 ```
 
 
-### 3.b) create the treatment plan on calibrated data
+#### 2.b) create a pivot chart of the final outcomes
+
+```{r}
+table(cal$chance_default)
+prop.table(table(cal$chance_default))
+```
+
+
+### 2.c) create the treatment plan on calibrated data
 
 The next step is to create a designed treatment plan from the calibration data set. 
 
+several versions of the design treatment function; use `designTreatmentsC` for classification schemes.
+
 ```{r}
-colname <- names(Lcal[1:108])
-Lcal<- Lcal[,-110]
+pc <- parallel::makeCluster(parallel::detectCores())
 
-("id",                        
-"loan_amnt",                 
-"funded_amnt",               
-"funded_amnt_inv",           
-"term",                  
-"int_rate",                  
-"installment",               
-"grade",                     
-"sub_grade",                
-"emp_title",                 
-"emp_length",                
-"home_ownership",            
-"annual_inc",                
-"verification_status",       
-"Issue_Month",               
-"Issue_Year",                
-"loan_status",               
-"pymnt_plan",                
-"url",                
-"desc",                      
-"purpose",                   
-"title",                     
- "zip_code",                  
- "addr_state",                
- "dti",                       
- "delinq_2yrs",               
- "earliest_cr_line",          
- "fico_range_low",            
- "fico_range_high",           
- "inq_last_6mths",            
- "open_acc",                  
-"pub_rec",                   
- "revol_bal",                 
- "revol_util",                
- "total_acc",                 
-"initial_list_status",       
- "out_prncp",                 
- "out_prncp_inv",             
-"total_pymnt",               
-"total_pymnt_inv",           
-"total_rec_prncp",           
-"total_rec_int",            
-"total_rec_late_fee",        
-"recoveries",                
-"collection_recovery_fee",   
-"last_pymnt_d",              
-"last_pymnt_amnt",           
-"next_pymnt_d",              
-"last_credit_pull_d",      
-"last_fico_range_high",      
-"last_fico_range_low",       
-"collections_12_mths_ex_med",
- "policy_code",               
- "application_type",          
- "verification_status_joint", 
- "acc_now_delinq",            
- "tot_coll_amt",              
- "tot_cur_bal",               
- "total_rev_hi_lim",          
- "acc_open_past_24mths",      
- "avg_cur_bal",               
- "bc_open_to_buy",            
- "bc_util",                   
- "chargeoff_within_12_mths",  
- "delinq_amnt",               
-"mo_sin_old_il_acct",        
- "mo_sin_old_rev_tl_op",      
- "mo_sin_rcnt_rev_tl_op",     
- "mo_sin_rcnt_tl",            
- "mort_acc",                  
- "mths_since_recent_bc",      
- "mths_since_recent_inq",     
- "num_accts_ever_120_pd",     
- "num_actv_bc_tl",            
- "num_actv_rev_tl",           
- "num_bc_sats",               
- "num_bc_tl",                 
- "num_il_tl",                 
- "num_op_rev_tl",             
- "num_rev_accts",             
- "num_rev_tl_bal_gt_0",       
- "num_sats",                  
- "num_tl_120dpd_2m",          
- "num_tl_30dpd",              
- "num_tl_90g_dpd_24m",        
- "num_tl_op_past_12m",        
- "pct_tl_nvr_dlq",            
- "percent_bc_gt_75",          
- "pub_rec_bankruptcies",      
- "tax_liens",                 
- "tot_hi_cred_lim",           
- "total_bal_ex_mort",         
- "total_bc_limit",            
- "total_il_high_credit_limit",
- "sec_app_earliest_cr_line",  
- "hardship_flag",             
- "hardship_type",             
- "hardship_reason",          
- "hardship_status",           
- "hardship_start_date",       
- "hardship_end_date",         
- "payment_plan_start_date",   
- "hardship_loan_status",      
- "disbursement_method",       
- "debt_settlement_flag",      
- "debt_settlement_flag_date", 
- "settlement_status",         
- "settlement_date")           
-
-treatments <- vtreat::designTreatmentsC(Lcal,
-                                c("id",               
-"loan_amnt",                 
-"funded_amnt",               
-"funded_amnt_inv",           
-"term",                  
-"int_rate",                  
-"installment",               
-"grade",                     
-"sub_grade",                
-"emp_title",                 
-"emp_length",                
-"home_ownership",            
-"annual_inc",                
-"verification_status",       
-"Issue_Month",               
-"Issue_Year",                
-"loan_status",               
-"pymnt_plan",                
-"url",                
-"desc",                      
-"purpose",                   
-"title",                     
- "zip_code",                  
- "addr_state",                
- "dti",                       
- "delinq_2yrs",               
- "earliest_cr_line",          
- "fico_range_low",            
- "fico_range_high",           
- "inq_last_6mths",            
- "open_acc",                  
-"pub_rec",                   
- "revol_bal",                 
- "revol_util",                
- "total_acc",                 
-"initial_list_status",       
- "out_prncp",                 
- "out_prncp_inv",             
-"total_pymnt",               
-"total_pymnt_inv",           
-"total_rec_prncp",           
-"total_rec_int",            
-"total_rec_late_fee",        
-"recoveries",                
-"collection_recovery_fee",   
-"last_pymnt_d",              
-"last_pymnt_amnt",           
-"next_pymnt_d",              
-"last_credit_pull_d",      
-"last_fico_range_high",      
-"last_fico_range_low",       
-"collections_12_mths_ex_med",
- "policy_code",               
- "application_type",          
- "verification_status_joint", 
- "acc_now_delinq",            
- "tot_coll_amt",              
- "tot_cur_bal",               
- "total_rev_hi_lim",          
- "acc_open_past_24mths",      
- "avg_cur_bal",               
- "bc_open_to_buy",            
- "bc_util",                   
- "chargeoff_within_12_mths",  
- "delinq_amnt",               
-"mo_sin_old_il_acct",        
- "mo_sin_old_rev_tl_op",      
- "mo_sin_rcnt_rev_tl_op",     
- "mo_sin_rcnt_tl",            
- "mort_acc",                  
- "mths_since_recent_bc",      
- "mths_since_recent_inq",     
- "num_accts_ever_120_pd",     
- "num_actv_bc_tl",            
- "num_actv_rev_tl",           
- "num_bc_sats",               
- "num_bc_tl",                 
- "num_il_tl",                 
- "num_op_rev_tl",             
- "num_rev_accts",             
- "num_rev_tl_bal_gt_0",       
- "num_sats",                  
- "num_tl_120dpd_2m",          
- "num_tl_30dpd",              
- "num_tl_90g_dpd_24m",        
- "num_tl_op_past_12m",        
- "pct_tl_nvr_dlq",            
- "percent_bc_gt_75",          
- "pub_rec_bankruptcies",      
- "tax_liens",                 
- "tot_hi_cred_lim",           
- "total_bal_ex_mort",         
- "total_bc_limit",            
- "total_il_high_credit_limit",
- "sec_app_earliest_cr_line",  
- "hardship_flag",             
- "hardship_type",             
- "hardship_reason",          
- "hardship_status",           
- "hardship_start_date",       
- "hardship_end_date",         
- "payment_plan_start_date",   
- "hardship_loan_status",      
- "disbursement_method",       
- "debt_settlement_flag",      
- "debt_settlement_flag_date", 
- "settlement_status",         
- "settlement_date",
-'chance_default'
-),
-'chance_default',
-outcometarget=TRUE,
-verbose=FALSE)
+treatment_plan <- vtreat::designTreatmentsC(cal,
+                 varlist = vars,
+                 outcomename = 'chance_default',
+                 outcometarget='risk',
+                 verbose=FALSE,
+                 parallelCluster = pc)
 ```
 
 
-### 3.c) apply the treatment plan to the treatment data set.
+Now check out the treatment plan by looking at the score frame.
+
+Each row of the score frame represents a transformed feature of the original data,indicated by the name in the `varName` column. 
+
+Note that the score frame contains all the variables listed in the original data set, plus additional variables containing an original column concatenated with prefixes of `isBAD`, `catB`, and `catP`.
+
+Transformed features without any prefix are the original features but without any missing values (NA).
+
+`isBAD` features are new, meta data features that contain binary representations of the presence or absence of data of their ancestral feature per record.
+
+`catB` feature is a new meta feature that contains the logit score of each response level of a factor variable and is considered the "impact" of the given level of a particular record.
+
+`catP` is a new meta feature that displays the percent of representation, that is the "prevalence" of a given level in a factor variable.
+
+The `rsq` and `sig` column represents the r-squared measure; the percent of variance explained by the model that the treatment plan devised and the significan of that measure.
+
+needSplit....
+
+Also notice that the high cardinality variables are divided up such that each level obtains its own binary feature. This format is analogous to dummy variables in traditional regression modeling.
 
 ```{r}
-TrainTreated <- vtreat::prepare(treatments,
-                                 Ltrain,
-                                 pruneSig=NULL)
+sf <- treatment_plan$scoreFrame
+head(sf)
+```
+
+```{r}
+#how many of the features are there?
+nrow(sf)
+table(sf$code)
+
+# how many columns should be used and others tossed?
+#about 149 out of 282 should be kept.
+table(sf$recommended)
+
+#pull all your variables
+sellvars <- sf$varName
+
+#Now pull out all of the recommended variables
+#model_vars <- sf$varName[sf$recommended]
+```
+
+
+### 3.e) apply the treatment plan to the training data to prepare the model
+
+```{r}
+train_treated <-vtreat::prepare(treatment_plan,
+                  train,
+                   parallelCluster = pc,
+                   pruneSig=NULL)
+```
+
+
+check out the train treated data.
+
+```{r}
+head(train_treated)
 ```
 
 
 
 
 
-
-
-
-```{r}
-transform_spec <- vtreat::BinomialOutcomeTreatment(
-    var_list = setdiff(colnames(d), c('y', 'yc')),  # columns to transform
-    outcome_name = 'yc',                            # outcome variable
-    outcome_target = TRUE                           # outcome of interest
-)
-```
-
-### apply your fit Prepare to fit to the transform.
-
-```{r}
-unpack[
-  treatment_plan = treatments,
-  d_prepared = cross_frame
-  ] <- fit_prepare(transform_spec, d)     
-
-# list the derived variables
-get_feature_names(treatment_plan)
-```
-
-
-
-
-I will also include examples of the past procedures for Vtreat using Mount and Zumel's other example (classfication example (https://github.com/WinVector/vtreat/blob/master/Examples/Classification/Classification.md).
